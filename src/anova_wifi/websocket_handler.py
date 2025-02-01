@@ -48,10 +48,10 @@ class AnovaWebsocketHandler:
             for device in payload:
                 if device["cookerId"] not in self.devices:
                     self.devices[device["cookerId"]] = APCWifiDevice(
-                        cooker_id=device["cookerId"],
-                        type=device["type"],
-                        paired_at=device["pairedAt"],
+                        id=device["cookerId"],
                         name=device["name"],
+                        state={},
+                        device_type=device["type"],
                     )
         elif message["command"] == AnovaCommand.EVENT_APC_STATE:
             cooker_id = message["payload"]["cookerId"]

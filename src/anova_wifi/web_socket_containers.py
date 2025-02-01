@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable
+from typing import Any, Callable, Optional, Union
 
 # All of the containers would probably be better of using dacite, but since HA sometimes has issues with dacite I am
 # doing them manually
@@ -30,6 +30,7 @@ class APCUpdateSensor:
     heater_temperature: float | None = None
     triac_temperature: float | None = None
     water_temperature: float | None = None
+    current_temperature: float | None = None
 
 
 @dataclass
@@ -92,6 +93,15 @@ class AnovaCommand(str, Enum):
     CMD_APC_START_ICEBATH_MONITORING = "CMD_APC_START_ICEBATH_MONITORING"
     CMD_APC_DISCONNECT = "CMD_APC_DISCONNECT"
     CMD_APC_HEALTHCHECK = "CMD_APC_HEALTHCHECK"
+
+    # Oven specific commands
+    CMD_OVEN_SET_MODE = "CMD_OVEN_SET_MODE"
+    CMD_OVEN_SET_TEMP = "CMD_OVEN_SET_TEMP"
+    CMD_OVEN_SET_STEAM = "CMD_OVEN_SET_STEAM"
+    CMD_OVEN_SET_TIMER = "CMD_OVEN_SET_TIMER"
+    CMD_OVEN_START = "CMD_OVEN_START"
+    CMD_OVEN_STOP = "CMD_OVEN_STOP"
+    CMD_OVEN_LIGHT = "CMD_OVEN_LIGHT"
 
 
 @dataclass
@@ -364,13 +374,134 @@ def build_a6_a7_payload(apc_response: dict[str, Any]) -> APCUpdate:
     return APCUpdate(binary_sensors, sensors)
 
 
+class OvenMode(str, Enum):
+    STANDBY = "standby"
+    COOKING = "cooking"
+    PREHEATING = "preheating"
+    COOLING = "cooling"
+    ERROR = "error"
+
+
+class OvenStage(str, Enum):
+    STEAM = "steam"
+    SOUS_VIDE = "sous_vide"
+    DRY = "dry"
+    PROOF = "proof"
+
+
+@dataclass
+class OvenStateBody:
+    mode: OvenMode
+    stage: Optional[OvenStage]
+    target_temperature: float
+    current_temperature: float
+    target_steam: Optional[int]
+    current_steam: Optional[int]
+    timer_remaining: Optional[int]
+    door_open: bool
+    light_on: bool
+    error_code: Optional[str]
+
+
+@dataclass
+class OvenUpdateSensor:
+    mode: str
+    stage: Optional[str]
+    target_temperature: float
+    current_temperature: float
+    target_steam: Optional[int]
+    current_steam: Optional[int]
+    timer_remaining: Optional[int]
+
+
+@dataclass
+class OvenUpdateBinary:
+    cooking: bool
+    preheating: bool
+    door_open: bool
+    light_on: bool
+    error: bool
+
+
+@dataclass
+class OvenUpdate:
+    binary_sensor: OvenUpdateBinary
+    sensor: OvenUpdateSensor
+
+
+def build_oven_state_body(state_data: dict[str, Any]) -> OvenStateBody:
+    """Build an oven state body from raw state data."""
+    return OvenStateBody(
+        mode=OvenMode(state_data.get("mode", "standby")),
+        stage=OvenStage(state_data["stage"]) if "stage" in state_data else None,
+        target_temperature=float(state_data.get("target_temp", 0)),
+        current_temperature=float(state_data.get("current_temp", 0)),
+        target_steam=state_data.get("target_steam"),
+        current_steam=state_data.get("current_steam"),
+        timer_remaining=state_data.get("timer"),
+        door_open=bool(state_data.get("door_open", False)),
+        light_on=bool(state_data.get("light", False)),
+        error_code=state_data.get("error_code"),
+    )
+
+
 @dataclass
 class APCWifiDevice:
-    cooker_id: str
-    type: str
-    paired_at: str
+    id: str
     name: str
-    update_listener: Callable[[APCUpdate], None] | None = None
+    state: dict[str, Any]
+    device_type: str = "sous_vide"
+    update_listener: Optional[Callable[[Union[APCUpdate, OvenUpdate]], None]] = None
 
-    def set_update_listener(self, update_function: Callable[[APCUpdate], None]) -> None:
-        self.update_listener = update_function
+    def to_update(self) -> Union[APCUpdate, OvenUpdate]:
+        """Convert device state to update object based on device type."""
+        if self.device_type == "oven":
+            return self._to_oven_update()
+        return self._to_sous_vide_update()
+
+    def _to_oven_update(self) -> OvenUpdate:
+        """Convert oven state to OvenUpdate."""
+        state = build_oven_state_body(self.state)
+
+        binary = OvenUpdateBinary(
+            cooking=state.mode == OvenMode.COOKING,
+            preheating=state.mode == OvenMode.PREHEATING,
+            door_open=state.door_open,
+            light_on=state.light_on,
+            error=state.mode == OvenMode.ERROR,
+        )
+
+        sensor = OvenUpdateSensor(
+            mode=state.mode.value,
+            stage=state.stage.value if state.stage else None,
+            target_temperature=state.target_temperature,
+            current_temperature=state.current_temperature,
+            target_steam=state.target_steam,
+            current_steam=state.current_steam,
+            timer_remaining=state.timer_remaining,
+        )
+
+        return OvenUpdate(binary_sensor=binary, sensor=sensor)
+
+    def _to_sous_vide_update(self) -> APCUpdate:
+        """Convert device state to APCUpdate."""
+        binary = APCUpdateBinary(
+            cooking=self.state.get("mode", "") in ["COOKING", "PREHEATING"],
+            preheating=self.state.get("mode", "") == "PREHEATING",
+            maintaining=self.state.get("mode", "") == "MAINTAINING",
+            device_safe=self.state.get("device_safe", True),
+            water_leak=self.state.get("water_leak", False),
+            water_level_critical=self.state.get("water_level_critical", False),
+            water_temp_too_high=self.state.get("water_temp_too_high", False),
+            water_level_low=self.state.get("water_level_low", False),
+        )
+        sensor = APCUpdateSensor(
+            target_temperature=float(self.state.get("target_temp", 0)),
+            current_temperature=float(self.state.get("current_temp", 0)),
+            state=self.state.get("mode", ""),
+            cook_time=int(self.state.get("timer_value", 0)),
+            cook_time_remaining=int(self.state.get("timer_value_remaining", 0)),
+            mode=self.state.get("mode", ""),
+            a3_state=None,
+        )
+        return APCUpdate(binary_sensor=binary, sensor=sensor)
