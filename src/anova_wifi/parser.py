@@ -1,16 +1,16 @@
 import asyncio
 import logging
 
-import aiohttp
-from aiohttp import ClientConnectorError
+from aiohttp import ClientConnectorError, ClientSession
 
 from .exceptions import InvalidLogin, LoginUnreachable, NoDevicesFound, WebsocketFailure
+from .web_socket_containers import APCWifiDevice
 from .websocket_handler import AnovaWebsocketHandler
 
 _LOGGER = logging.getLogger(__name__)
 
 # Found here - https://github.com/ammarzuberi/pyanova-api/blob/master/anova/AnovaCooker.py and personally confirmed.
-ANOVA_FIREBASE_KEY = "AIzaSyDQiOP2fTR9zvFcag2kSbcmG9zPh6gZhHw"
+ANOVA_FIREBASE_KEY = "AIzaSyDQiOP2fTR9zvFcag2kXrrFaeRHYxj3lHI"
 
 
 class AnovaApi:
@@ -18,7 +18,7 @@ class AnovaApi:
 
     def __init__(
         self,
-        session: aiohttp.ClientSession,
+        session: ClientSession,
         username: str,
         password: str,
     ) -> None:
@@ -29,6 +29,17 @@ class AnovaApi:
         self.jwt: str | None = None
         self._firebase_jwt: str | None = None
         self.websocket_handler: AnovaWebsocketHandler | None = None
+
+    async def get_devices(self) -> dict[str, APCWifiDevice]:
+        """Get all available devices."""
+        if self.websocket_handler is None:
+            await self.authenticate()
+            await self.create_websocket()
+
+        if self.websocket_handler is None:
+            raise WebsocketFailure("Websocket handler is None after initialization")
+
+        return self.websocket_handler.devices
 
     async def authenticate(self) -> bool:
         """Auth with Firebase server"""
