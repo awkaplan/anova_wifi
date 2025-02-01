@@ -1,5 +1,7 @@
 import asyncio
 import logging
+from enum import Enum
+from typing import Optional
 
 import aiohttp
 from aiohttp import ClientConnectorError
@@ -13,6 +15,13 @@ _LOGGER = logging.getLogger(__name__)
 ANOVA_FIREBASE_KEY = "AIzaSyDQiOP2fTR9zvFcag2kSbcmG9zPh6gZhHw"
 
 
+class AuthProvider(str, Enum):
+    EMAIL = "email"
+    GOOGLE = "google.com"
+    FACEBOOK = "facebook.com"
+    APPLE = "apple.com"
+
+
 class AnovaApi:
     """A class to handle communicating with the anova api to get devices"""
 
@@ -21,37 +30,63 @@ class AnovaApi:
         session: aiohttp.ClientSession,
         username: str,
         password: str,
+        auth_provider: AuthProvider = AuthProvider.EMAIL,
+        id_token: Optional[str] = None,
+        callback_url: str = "http://localhost"
     ) -> None:
         """Creates an anova api class"""
         self.session = session
         self.username = username
         self.password = password
+        self.auth_provider = auth_provider
+        self.id_token = id_token
+        self.callback_url = callback_url
         self.jwt: str | None = None
         self._firebase_jwt: str | None = None
         self.websocket_handler: AnovaWebsocketHandler | None = None
 
     async def authenticate(self) -> bool:
         """Auth with Firebase server"""
-        # Code loving yoinked from https://github.com/ammarzuberi/pyanova-api/blob/master/anova/AnovaCooker.py
-        firebase_req_data = {
-            "email": self.username,
-            "password": self.password,
-            "returnSecureToken": True,
-        }
+        if self.auth_provider == AuthProvider.EMAIL:
+            firebase_req_data = {
+                "email": self.username,
+                "password": self.password,
+                "returnSecureToken": True,
+            }
+            endpoint = (
+                "https://www.googleapis.com/identitytoolkit/v3/relyingparty/"
+                f"verifyPassword?key={ANOVA_FIREBASE_KEY}"
+            )
+        else:
+            if not self.id_token:
+                raise InvalidLogin("ID token required for social authentication")
+
+            firebase_req_data = {
+                "postBody": f"id_token={self.id_token}&providerId={self.auth_provider}",
+                "requestUri": self.callback_url,
+                "returnSecureToken": True,
+                "returnIdpCredential": True,
+            }
+            endpoint = (
+                "https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?"
+                f"key={ANOVA_FIREBASE_KEY}"
+            )
+
         try:
             firebase_req = await self.session.post(
-                f"https://www.googleapis.com/identitytoolkit/v3/relyingparty/verifyPassword?key={ANOVA_FIREBASE_KEY}",
+                endpoint,
                 json=firebase_req_data,
             )
         except ClientConnectorError as err:
             raise LoginUnreachable(
                 "Failed to connect to Anova's firebase instance"
             ) from err
+
         firebase_id_token_json = await firebase_req.json()
         self._firebase_jwt = firebase_id_token_json.get("idToken")
 
         if not self._firebase_jwt:
-            raise InvalidLogin("Could not log in with Google Firebase")
+            raise InvalidLogin("Could not log in with Firebase")
 
         # Now authenticate with Anova using the Firebase ID token to get the JWT
         anova_auth_req = await self.session.post(
